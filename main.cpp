@@ -235,7 +235,14 @@ int main(int argc, char **argv) {
     if (current_prog_header.p_type != 1) {
         continue;
     }
-    munmap(reinterpret_cast<void*>(current_prog_header.p_vaddr), current_prog_header.p_memsz);
+    munmap(reinterpret_cast<void*>(loaded_elf_segments[i]), current_prog_header.p_memsz);
+  }
+  for (int i = 0; i < elf_hdr.e_phnum; i++) {
+    auto current_prog_header = interp_program_headers[i];
+    if (current_prog_header.p_type != 1) {
+        continue;
+    }
+    munmap(reinterpret_cast<void*>(loaded_segments[i]), current_prog_header.p_memsz);
   }
   return 0;
 }
