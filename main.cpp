@@ -166,9 +166,9 @@ int main(int argc, char **argv) {
   }
 
   void* entry_point = reinterpret_cast<void*>(base_interp + interp_elf_hdr.e_entry);
-  char* dupe_argv[] = {interp,(char*)"./ls",(char*)"--help", nullptr};
+  char* dupe_argv[] = {interp,(char*)"./elf", nullptr};
   char* envp[] = {(char*)"PATH=/bin:/usr/bin", nullptr};
-  int dupe_argc = 3;
+  int dupe_argc = 2;
   void** stack_top = (void**)((char*)stack_base + stack_size);
 
   *--stack_top = 0;
