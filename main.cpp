@@ -79,7 +79,7 @@ void* mmap_elf_segments(Elf64_Ehdr elf_hdr, Elf64_Phdr (&pheaders)[], int fd, vo
   return base_address;
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv, char **envp) {
   int fd = open("elf", O_RDONLY);
     if (fd == -1) {
         std::cerr << "Error opening file." << std::endl;
@@ -153,7 +153,7 @@ int main(int argc, char **argv) {
 
   void* entry_point = reinterpret_cast<void*>(base_interp + interp_elf_hdr.e_entry);
   char* dupe_argv[] = {interp,(char*)"./elf", nullptr};
-  char* envp[] = {(char*)"PATH=/bin:/usr/bin", nullptr};
+  // char* envp[] = {(char*)"PATH=/bin:/usr/bin", nullptr};
   int dupe_argc = 2;
   void** stack_top = (void**)((char*)stack_base + stack_size);
 
@@ -167,9 +167,9 @@ int main(int argc, char **argv) {
 
   *--stack_top = 0;
   // push argv strings backwards
-  for (i = 0; dupe_argv[i] != nullptr; i++);
+  for (i = 0; argv[i] != nullptr; i++);
   for (; i >= 0; i--) {
-      *--stack_top = dupe_argv[i];
+      *--stack_top = argv[i];
   }
 
   *--stack_top = 0;
@@ -198,12 +198,14 @@ int main(int argc, char **argv) {
   *--stack_top = (void*)0;  // AT_NULL value (terminator)
   *--stack_top = (void*)AT_NULL; // AT_NULL type (terminator)
 
+  *--stack_top = 0;
+
   *--stack_top = envp;
   *--stack_top = 0;
-  *--stack_top = dupe_argv;
+  *--stack_top = argv;
 
   // push argc
-  *--stack_top = (void*)(dupe_argc -1);
+  *--stack_top = (void*)(argc);
 
   // Set up registers and jump to execution
   SET_RDI(&argc);
