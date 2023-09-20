@@ -8,15 +8,24 @@
 #include <limits.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <vector>
+#include <cstring>
 
-#define JMP_ADDR(x) asm("\tjmp  *%0\n" :: "r" (x))
-#define RET_JUMP_TO_ADDR(x) asm("mov %0, %%rsp\n\tret" :: "r" (x))
-#define SET_STACK(x) asm("\tmovq %0, %%rsp\n" :: "r"(x))
-#define SET_RDI(x) asm("\tmovq %0, %%rdi\n" :: "g"(x))
-#define SET_RSI(x) asm("\tmovq %0, %%rsi\n" :: "g"(x))
-#define SET_RDX(x) asm("\tmovq %0, %%rdx\n" :: "g"(x))
-#define SET_RBX(x) asm("\tmovq %0, %%rbx\n" :: "g"(x))
-#define SET_RCX(x) asm("\tmovq %0, %%rcx\n" :: "g"(x))
+#define INIT_AND_JUMP(stack, rdi, rsi, rdx, rbx, rcx, target) \
+    asm volatile( \
+        "movq %0, %%rsp\n\t" \
+        "movq %1, %%rdi\n\t" \
+        "movq %2, %%rsi\n\t" \
+        "movq %3, %%rdx\n\t" \
+        "movq %4, %%rbx\n\t" \
+        "movq %5, %%rcx\n\t" \
+        "mov %6, %%rsp\n\t" \
+        "ret" \
+        : \
+        : "g"(stack), "g"(rdi), "g"(rsi), "g"(rdx), "g"(rbx), "g"(rcx), "g"(target) \
+        : "rsp", "rdi", "rsi", "rdx", "rbx", "rcx" \
+    )
+
 
 
 void get_program_headers(int fd, Elf64_Ehdr header, Elf64_Phdr (&pheader)[]) {
@@ -80,7 +89,7 @@ void* mmap_elf_segments(Elf64_Ehdr elf_hdr, Elf64_Phdr (&pheaders)[], int fd, vo
 }
 
 int main(int argc, char **argv, char **envp) {
-  int fd = open("elf", O_RDONLY);
+  int fd = open(argv[1], O_RDONLY);
     if (fd == -1) {
         std::cerr << "Error opening file." << std::endl;
         return 1;
@@ -136,7 +145,7 @@ int main(int argc, char **argv, char **envp) {
   void* base_elf = mmap_elf_segments(elf_header, program_headers, fd, loaded_elf_segments);
 
   // Set up the stack
-  size_t stack_size = 16 * 1024 * 1024;
+  size_t stack_size = 32 * 1024 * 1024;
   void* stack_base = mmap(
       nullptr, 
       stack_size, 
@@ -152,69 +161,71 @@ int main(int argc, char **argv, char **envp) {
   }
 
   void* entry_point = reinterpret_cast<void*>(base_interp + interp_elf_hdr.e_entry);
-  char* dupe_argv[] = {interp,(char*)"./elf", nullptr};
   // char* envp[] = {(char*)"PATH=/bin:/usr/bin", nullptr};
-  int dupe_argc = 2;
   void** stack_top = (void**)((char*)stack_base + stack_size);
 
   *--stack_top = 0;
   // push envp strings backwards
-  int i;
-  for (i = 0; envp[i] != nullptr; i++);
-  for (; i >= 0; i--) {
-      *--stack_top = envp[i];
+  std::vector<void*> envp_pointers;
+  stack_top--;
+  for (int i = 0; envp[i] != nullptr; i++) {
+    envp_pointers.push_back(std::memcpy(stack_top, envp[i], strlen(envp[i])));
+    stack_top -= strlen(envp[i]) + 1;
   }
 
   *--stack_top = 0;
+  stack_top--;
   // push argv strings backwards
-  for (i = 0; argv[i] != nullptr; i++);
-  for (; i >= 0; i--) {
-      *--stack_top = argv[i];
+  std::vector<void*> argv_pointers;
+  argv[0] = interp;
+  for (int i = 0; i < argc; i++) {
+    argv_pointers.push_back(std::memcpy(stack_top, argv[i], strlen(argv[i])));
+    stack_top -= strlen(argv[i]) + 1;
   }
 
   *--stack_top = 0;
 
-  // auxv make
-  *--stack_top = loaded_segments[1];
-  *--stack_top = (void*)AT_BASE;     // AT_ENTRY type
-
-  *--stack_top = (void*)(elf_header.e_entry + base_elf);  // AT_ENTRY value
-  *--stack_top = (void*)AT_ENTRY;     // AT_ENTRY type
-  std::cout<<std::hex<<elf_header.e_entry + base_elf<<"\n";
-  std::cout<<std::hex<<elf_header.e_entry<<"\n";
-
-  *--stack_top = (void*)program_headers; // AT_PHDR value
-  *--stack_top = (void*)AT_PHDR;         // AT_PHDR type
-
-  *--stack_top = (void*)elf_header.e_phentsize; // AT_PHENT value
-  *--stack_top = (void*)AT_PHENT;          // AT_PHENT type
-
-  *--stack_top = (void*)sysconf(_SC_PAGESIZE);
-  *--stack_top = (void*)AT_PAGESZ;           // AT_PAGESZ
-
-  *--stack_top = (void*)elf_header.e_phnum; // AT_PHNUM value
-  *--stack_top = (void*)AT_PHNUM;           // AT_PHNUM type
-
+  // auxv
   *--stack_top = (void*)0;  // AT_NULL value (terminator)
   *--stack_top = (void*)AT_NULL; // AT_NULL type (terminator)
 
-  *--stack_top = 0;
+  *--stack_top = (void*)program_headers; // AT_PHDR value
+  *--stack_top = (void*)AT_PHDR;         // AT_PHDR type
+  std::cout<<"AT_PHDR: "<<std::hex<<(void*)program_headers<<"\n";
 
-  *--stack_top = envp;
-  *--stack_top = 0;
-  *--stack_top = argv;
+  *--stack_top = (void*)elf_header.e_phentsize; // AT_PHENT value
+  *--stack_top = (void*)AT_PHENT;          // AT_PHENT type
+  std::cout<<"AT_PHENT: "<<std::dec<<elf_header.e_phentsize<<"\n";
+
+  *--stack_top = (void*)AT_PHNUM;           // AT_PHNUM type
+  *--stack_top = (void*)elf_header.e_phnum; // AT_PHNUM value
+  std::cout<<"AT_PHNUM: "<<std::dec<<elf_header.e_phnum<<"\n";
+
+  *--stack_top = (void*)sysconf(_SC_PAGESIZE);
+  *--stack_top = (void*)AT_PAGESZ;      // AT_PAGESZ
+
+  *--stack_top = loaded_segments[0];
+  *--stack_top = (void*)AT_BASE;     // AT_ENTRY type
+  std::cout<<"AT_BASE: "<<std::hex<<loaded_segments[0]<<"\n";
+
+  *--stack_top = (void*)AT_ENTRY;     // AT_ENTRY type
+  *--stack_top = reinterpret_cast<void*>(elf_header.e_entry + base_elf);  // AT_ENTRY value
+  std::cout<<"AT_ENTRY: "<<std::hex<<elf_header.e_entry + base_elf<<"\n";
+
+  *--stack_top = (void*)0;
+  for (auto e: envp_pointers) {
+    *--stack_top = e;
+  }
+  *--stack_top = (void*)0;
+  for (auto a: argv_pointers) {
+    *--stack_top = a;
+  }
 
   // push argc
-  *--stack_top = (void*)(argc);
-
+  *(int*)--stack_top = argc;
+  
   // Set up registers and jump to execution
-  SET_RDI(&argc);
-  SET_RSI(&dupe_argv);
-  SET_RDX(&envp);
-  SET_RBX(&envp);
-  SET_RCX(&argv[0]);
-  SET_STACK(stack_top);
-  RET_JUMP_TO_ADDR(entry_point);
+  INIT_AND_JUMP(stack_top, &argc, &argv, &envp, &envp, &argv[0], entry_point);
 
   close(fd);
   close(interp_fd);
