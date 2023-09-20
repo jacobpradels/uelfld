@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #define JMP_ADDR(x) asm("\tjmp  *%0\n" :: "r" (x))
+#define RET_JUMP_TO_ADDR(x) asm("mov %0, %%rsp\n\tret" :: "r" (x))
 #define SET_STACK(x) asm("\tmovq %0, %%rsp\n" :: "r"(x))
 #define SET_RDI(x) asm("\tmovq %0, %%rdi\n" :: "g"(x))
 #define SET_RSI(x) asm("\tmovq %0, %%rsi\n" :: "g"(x))
@@ -31,6 +32,7 @@ void* mmap_elf_segments(Elf64_Ehdr elf_hdr, Elf64_Phdr (&pheaders)[], int fd, vo
   uint64_t total_size;
   for (int i = 0; i < elf_hdr.e_phnum; i++) {
     auto current_prog_header = pheaders[i];
+    // if (current_prog_header.p_filesz != current_prog_header.p_memsz) continue;
     if (current_prog_header.p_type != 1) continue;
     if (current_prog_header.p_vaddr < start_addr) {
       start_addr = current_prog_header.p_vaddr;
@@ -38,56 +40,40 @@ void* mmap_elf_segments(Elf64_Ehdr elf_hdr, Elf64_Phdr (&pheaders)[], int fd, vo
     end_addr = std::max(current_prog_header.p_vaddr + current_prog_header.p_memsz, end_addr);
   }
   total_size = end_addr - start_addr;
-  void *base_address = mmap(NULL, total_size, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+  // 1. Calculate the mmap offset, ensuring it aligns with the page size.
+    off_t page_size = sysconf(_SC_PAGESIZE);
+    off_t mmap_offset = pheaders[0].p_offset & ~(page_size - 1);
+    off_t elf_adjustment = pheaders[0].p_offset - mmap_offset;
+
+    size_t file_backed_size = total_size + elf_adjustment;
+  void *base_address = mmap(NULL, file_backed_size, PROT_NONE, MAP_PRIVATE, fd, pheaders[0].p_offset & ~(page_size - 1)) ;
   if (base_address == MAP_FAILED) {
     std::cout<<"Fail allocation of base address\n";
+    std::cerr<<errno<<"\n";
     return (void*)1;
   }
   for (int i = 0; i < elf_hdr.e_phnum; i++) {
     auto current_prog_header = pheaders[i];
-    if (current_prog_header.p_type != 1) {
-        continue;
-    }
+    if (current_prog_header.p_type != 1) continue;
+    // if (current_prog_header.p_memsz != current_prog_header.p_filesz) {
+    //   memset(reinterpret_cast<void*>(base_address + current_prog_header.p_filesz), 0, current_prog_header.p_filesz - current_prog_header.p_memsz);
+    // }
+    void* start = reinterpret_cast<void*>(base_address + current_prog_header.p_vaddr);
+    if ((uintptr_t)start % 0x1000 != 0) {
+      start += page_size - (reinterpret_cast<uintptr_t>(start) % page_size);
+    };
+    loaded_segments[i] = start;
+    size_t size = current_prog_header.p_memsz;
     int prot = 0;
-
-    if (current_prog_header.p_flags & PF_R) {
-        prot |= PROT_READ;
+    if (current_prog_header.p_flags & PF_R) prot |= PROT_READ;
+    if (current_prog_header.p_flags & PF_W) prot |= PROT_WRITE;
+    if (current_prog_header.p_flags & PF_X) prot |= PROT_EXEC;
+    int res = mprotect(start, size, prot);
+    if (res == -1) {
+      std::cout<<"mprotect fail "<<errno<<"\n";
     }
-    if (current_prog_header.p_flags & PF_W) {
-        prot |= PROT_WRITE;
-    }
-    if (current_prog_header.p_flags & PF_X) {
-        prot |= PROT_EXEC;
-    }
-    off_t page_size = sysconf(_SC_PAGESIZE);
-
-    // 1. Calculate the mmap offset, ensuring it aligns with the page size.
-    off_t mmap_offset = current_prog_header.p_offset & ~(page_size - 1);
-    off_t elf_adjustment = current_prog_header.p_offset - mmap_offset;
-
-    // 2. Adjust the requested address for the mmap.
-    void* requested_address = reinterpret_cast<char*>(base_address) + current_prog_header.p_vaddr - elf_adjustment;
-
-    // 3. Map the file-backed portion.
-    size_t file_backed_size = current_prog_header.p_filesz + elf_adjustment;
-    loaded_segments[i] = mmap(requested_address, file_backed_size, prot, 
-                                    MAP_FIXED | MAP_PRIVATE, fd, mmap_offset);
-
-    if (loaded_segments[i] == MAP_FAILED) {
-        std::cerr << "Failed to map file-backed portion. Error code: " << errno << std::endl;
-        return nullptr;
-    }
-
-    size_t anon_size = current_prog_header.p_memsz - current_prog_header.p_filesz;
-    if (anon_size > 0) {
-        void* anon_start = loaded_segments[i]+file_backed_size;
-        void* anon_mapping = mmap(anon_start, anon_size, prot, 
-                                 MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-        
-        if (anon_mapping == MAP_FAILED) {
-            std::cerr << "Failed to map anonymous portion. Error code: " << errno << std::endl;
-            return nullptr;
-        }
+    if (current_prog_header.p_filesz > current_prog_header.p_memsz) {
+      memset(start + current_prog_header.p_filesz, 0, current_prog_header.p_memsz - current_prog_header.p_filesz);
     }
   }
   return base_address;
@@ -194,6 +180,8 @@ int main(int argc, char **argv) {
 
   *--stack_top = (void*)(elf_header.e_entry + base_elf);  // AT_ENTRY value
   *--stack_top = (void*)AT_ENTRY;     // AT_ENTRY type
+  std::cout<<std::hex<<elf_header.e_entry + base_elf<<"\n";
+  std::cout<<std::hex<<elf_header.e_entry<<"\n";
 
   *--stack_top = (void*)program_headers; // AT_PHDR value
   *--stack_top = (void*)AT_PHDR;         // AT_PHDR type
@@ -224,7 +212,7 @@ int main(int argc, char **argv) {
   SET_RBX(&envp);
   SET_RCX(&argv[0]);
   SET_STACK(stack_top);
-  JMP_ADDR(entry_point);
+  RET_JUMP_TO_ADDR(entry_point);
 
   close(fd);
   close(interp_fd);
