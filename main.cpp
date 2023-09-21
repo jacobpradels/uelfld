@@ -186,31 +186,33 @@ int main(int argc, char **argv, char **envp) {
   *--stack_top = 0;
 
   // auxv
-  *--stack_top = (void*)0;  // AT_NULL value (terminator)
-  *--stack_top = (void*)AT_NULL; // AT_NULL type (terminator)
+  Elf64_auxv_t at_null = { AT_NULL, {.a_val = NULL}};
+  std::memcpy(stack_top, &at_null, sizeof(Elf64_auxv_t));
+  stack_top -= 2;
 
-  *--stack_top = (void*)program_headers; // AT_PHDR value
-  *--stack_top = (void*)AT_PHDR;         // AT_PHDR type
-  std::cout<<"AT_PHDR: "<<std::hex<<(void*)program_headers<<"\n";
+  Elf64_auxv_t at_phdr = { AT_PHDR, {.a_val = (uint64_t)&program_headers[0]} };
+  std::memcpy(stack_top, &at_phdr, sizeof(Elf64_auxv_t));
+  stack_top -= 2;
 
-  *--stack_top = (void*)elf_header.e_phentsize; // AT_PHENT value
-  *--stack_top = (void*)AT_PHENT;          // AT_PHENT type
-  std::cout<<"AT_PHENT: "<<std::dec<<elf_header.e_phentsize<<"\n";
+  Elf64_auxv_t at_phent = { AT_PHENT, {.a_val = (uint64_t)&elf_header.e_phentsize}};
+  std::memcpy(stack_top, &at_phent, sizeof(Elf64_auxv_t));
+  stack_top -= 2;
 
-  *--stack_top = (void*)AT_PHNUM;           // AT_PHNUM type
-  *--stack_top = (void*)elf_header.e_phnum; // AT_PHNUM value
-  std::cout<<"AT_PHNUM: "<<std::dec<<elf_header.e_phnum<<"\n";
+  Elf64_auxv_t at_phnum = { AT_PHNUM,  {.a_val = elf_header.e_phnum }};
+  std::memcpy(stack_top, &at_phnum, sizeof(Elf64_auxv_t));
+  stack_top -= 2;
 
-  *--stack_top = (void*)sysconf(_SC_PAGESIZE);
-  *--stack_top = (void*)AT_PAGESZ;      // AT_PAGESZ
+  Elf64_auxv_t at_pagesz = { AT_PAGESZ,  {.a_val = sysconf(_SC_PAGESIZE) }};
+  std::memcpy(stack_top, &at_pagesz, sizeof(Elf64_auxv_t));
+  stack_top -= 2;
 
-  *--stack_top = loaded_segments[0];
-  *--stack_top = (void*)AT_BASE;     // AT_ENTRY type
-  std::cout<<"AT_BASE: "<<std::hex<<loaded_segments[0]<<"\n";
+  Elf64_auxv_t at_base = { AT_BASE,  {.a_val = (uint64_t)loaded_segments[0] }};
+  std::memcpy(stack_top, &at_base, sizeof(Elf64_auxv_t));
+  stack_top -= 2;
 
-  *--stack_top = (void*)AT_ENTRY;     // AT_ENTRY type
-  *--stack_top = reinterpret_cast<void*>(elf_header.e_entry + base_elf);  // AT_ENTRY value
-  std::cout<<"AT_ENTRY: "<<std::hex<<elf_header.e_entry + base_elf<<"\n";
+  Elf64_auxv_t at_entry = { AT_ENTRY,  {.a_val = (uint64_t)(elf_header.e_entry + (uint64_t)base_elf) }};
+  std::memcpy(stack_top, &at_entry, sizeof(Elf64_auxv_t));
+  stack_top -= 2;
 
   *--stack_top = (void*)0;
   for (auto e: envp_pointers) {
