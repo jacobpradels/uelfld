@@ -10,23 +10,9 @@
 #include <unistd.h>
 #include <vector>
 #include <cstring>
+#include <algorithm>
 
-#define INIT_AND_JUMP(stack, rdi, rsi, rdx, rbx, rcx, target) \
-    asm volatile( \
-        "movq %0, %%rsp\n\t" \
-        "movq %1, %%rdi\n\t" \
-        "movq %2, %%rsi\n\t" \
-        "movq %3, %%rdx\n\t" \
-        "movq %4, %%rbx\n\t" \
-        "movq %5, %%rcx\n\t" \
-        "mov %6, %%rsp\n\t" \
-        "ret" \
-        : \
-        : "g"(stack), "g"(rdi), "g"(rsi), "g"(rdx), "g"(rbx), "g"(rcx), "g"(target) \
-        : "rsp", "rdi", "rsi", "rdx", "rbx", "rcx" \
-    )
-
-
+#include "elf_loader.h"
 
 void get_program_headers(int fd, Elf64_Ehdr header, Elf64_Phdr (&pheader)[]) {
   lseek(fd, header.e_phoff, SEEK_SET);
@@ -35,60 +21,10 @@ void get_program_headers(int fd, Elf64_Ehdr header, Elf64_Phdr (&pheader)[]) {
   }
 }
 
-void* mmap_elf_segments(Elf64_Ehdr elf_hdr, Elf64_Phdr (&pheaders)[], int fd, void* (&loaded_segments)[]) {
-  uint64_t start_addr = UINT64_MAX;
-  uint64_t end_addr = 0;
-  uint64_t total_size;
-  for (int i = 0; i < elf_hdr.e_phnum; i++) {
-    auto current_prog_header = pheaders[i];
-    // if (current_prog_header.p_filesz != current_prog_header.p_memsz) continue;
-    if (current_prog_header.p_type != 1) continue;
-    if (current_prog_header.p_vaddr < start_addr) {
-      start_addr = current_prog_header.p_vaddr;
-    }
-    end_addr = std::max(current_prog_header.p_vaddr + current_prog_header.p_memsz, end_addr);
-  }
-  total_size = end_addr - start_addr;
-  // 1. Calculate the mmap offset, ensuring it aligns with the page size.
-    off_t page_size = sysconf(_SC_PAGESIZE);
-    off_t mmap_offset = pheaders[0].p_offset & ~(page_size - 1);
-    off_t elf_adjustment = pheaders[0].p_offset - mmap_offset;
 
-    size_t file_backed_size = total_size + elf_adjustment;
-  void *base_address = mmap(NULL, file_backed_size, PROT_NONE, MAP_PRIVATE, fd, pheaders[0].p_offset & ~(page_size - 1)) ;
-  if (base_address == MAP_FAILED) {
-    std::cout<<"Fail allocation of base address\n";
-    std::cerr<<errno<<"\n";
-    return (void*)1;
-  }
-  for (int i = 0; i < elf_hdr.e_phnum; i++) {
-    auto current_prog_header = pheaders[i];
-    if (current_prog_header.p_type != 1) continue;
-    // if (current_prog_header.p_memsz != current_prog_header.p_filesz) {
-    //   memset(reinterpret_cast<void*>(base_address + current_prog_header.p_filesz), 0, current_prog_header.p_filesz - current_prog_header.p_memsz);
-    // }
-    void* start = reinterpret_cast<void*>(base_address + current_prog_header.p_vaddr);
-    if ((uintptr_t)start % 0x1000 != 0) {
-      start += page_size - (reinterpret_cast<uintptr_t>(start) % page_size);
-    };
-    loaded_segments[i] = start;
-    size_t size = current_prog_header.p_memsz;
-    int prot = 0;
-    if (current_prog_header.p_flags & PF_R) prot |= PROT_READ;
-    if (current_prog_header.p_flags & PF_W) prot |= PROT_WRITE;
-    if (current_prog_header.p_flags & PF_X) prot |= PROT_EXEC;
-    int res = mprotect(start, size, prot);
-    if (res == -1) {
-      std::cout<<"mprotect fail "<<errno<<"\n";
-    }
-    if (current_prog_header.p_filesz > current_prog_header.p_memsz) {
-      memset(start + current_prog_header.p_filesz, 0, current_prog_header.p_memsz - current_prog_header.p_filesz);
-    }
-  }
-  return base_address;
-}
 
 int main(int argc, char **argv, char **envp) {
+
   int fd = open(argv[1], O_RDONLY);
     if (fd == -1) {
         std::cerr << "Error opening file." << std::endl;
@@ -108,38 +44,43 @@ int main(int argc, char **argv, char **envp) {
 
   // Load file descriptor of interpreter
   int interp_fd;
-  int interpreter_index;
+  int interpreter_index = -1;
   for (int i = 0; i < elf_header.e_phnum; i++) {
     if (program_headers[i].p_type == 3) {
       interpreter_index = i;
     }
   }
-  // Read value of interpeter path
-  char interp[program_headers[interpreter_index].p_filesz];
-  lseek(fd, program_headers[interpreter_index].p_offset, SEEK_SET);
-  read(fd, &interp, program_headers[interpreter_index].p_filesz);
-  // Read Interpreter ELF file
-  interp_fd = open(interp, O_RDONLY);
-  std::cout<<interp<<"\n";
-  if (interp_fd == -1) {
-    std::cerr << "Error opening file." << std::endl;
-    return 1;
-  }
-
-  // Interpreter ELF Header
   Elf64_Ehdr interp_elf_hdr;
-  if (read(interp_fd, &interp_elf_hdr, sizeof(Elf64_Ehdr)) == -1) {
-        std::cerr << "Error reading file." << std::endl;
-        return 1;
+  void* base_interp;
+  char interp[program_headers[interpreter_index].p_filesz];
+  if (interpreter_index != -1) {
+
+    // Read value of interpeter path
+    lseek(fd, program_headers[interpreter_index].p_offset, SEEK_SET);
+    read(fd, &interp, program_headers[interpreter_index].p_filesz);
+    // Read Interpreter ELF file
+    interp_fd = open(interp, O_RDONLY);
+    std::cout<<interp<<"\n";
+    if (interp_fd == -1) {
+      std::cerr << "Error opening file." << std::endl;
+      return 1;
+    }
+
+    // Interpreter ELF Header
+    if (read(interp_fd, &interp_elf_hdr, sizeof(Elf64_Ehdr)) == -1) {
+          std::cerr << "Error reading file." << std::endl;
+          return 1;
+    }
   }
-
-  // Retrieve Interpreter Program Headers
+  void *loaded_segments[interp_elf_hdr.e_phnum];// I was here
   Elf64_Phdr interp_program_headers[interp_elf_hdr.e_phnum];
-  get_program_headers(interp_fd, interp_elf_hdr, interp_program_headers);
+  if (interpreter_index != -1) {
+    // Retrieve Interpreter Program Headers
+    get_program_headers(interp_fd, interp_elf_hdr, interp_program_headers);
 
-  // Load Interpreter LOAD Segments into memory
-  void *loaded_segments[interp_elf_hdr.e_phnum];
-  void* base_interp = mmap_elf_segments(interp_elf_hdr, interp_program_headers, interp_fd, loaded_segments);
+    // Load Interpreter LOAD Segments into memory
+    base_interp = mmap_elf_segments(interp_elf_hdr, interp_program_headers, interp_fd, loaded_segments);
+  }
 
   void *loaded_elf_segments[elf_header.e_phnum];
   void* base_elf = mmap_elf_segments(elf_header, program_headers, fd, loaded_elf_segments);
@@ -159,9 +100,13 @@ int main(int argc, char **argv, char **envp) {
       std::cerr<<"Failed to allocate memory\n";
       std::cerr << "Error code: " << errno << std::endl;
   }
-
-  void* entry_point = reinterpret_cast<void*>(base_interp + interp_elf_hdr.e_entry);
-  // char* envp[] = {(char*)"PATH=/bin:/usr/bin", nullptr};
+  void* entry_point;
+  if (interpreter_index != -1) {
+    entry_point = reinterpret_cast<void*>(base_interp + interp_elf_hdr.e_entry);
+  } else {
+    entry_point = reinterpret_cast<void*>(base_elf + elf_header.e_entry - 0x400000);
+  }
+  std::cout<<std::hex<<entry_point<<"\n";
   void** stack_top = (void**)((char*)stack_base + stack_size);
 
   *--stack_top = 0;
@@ -169,8 +114,10 @@ int main(int argc, char **argv, char **envp) {
   std::vector<void*> envp_pointers;
   stack_top--;
   for (int i = 0; envp[i] != nullptr; i++) {
-    envp_pointers.push_back(std::memcpy(stack_top, envp[i], strlen(envp[i])));
-    stack_top -= strlen(envp[i]) + 1;
+    if (strlen(envp[i]) < sysconf(_SC_PAGESIZE) * 32) {
+      envp_pointers.push_back(std::memcpy(stack_top, envp[i], strlen(envp[i])));
+      stack_top -= strlen(envp[i]) + 1;
+    }
   }
 
   *--stack_top = 0;
@@ -185,40 +132,43 @@ int main(int argc, char **argv, char **envp) {
 
   *--stack_top = 0;
 
-  // auxv
-  Elf64_auxv_t at_null = { AT_NULL, {.a_val = NULL}};
-  std::memcpy(stack_top, &at_null, sizeof(Elf64_auxv_t));
-  stack_top -= 2;
+  Elf64_auxv_t at_entry = { AT_ENTRY,  {.a_val = reinterpret_cast<uint64_t>(entry_point)}};
+  std::memcpy(stack_top, &at_entry, sizeof(Elf64_auxv_t));
+  stack_top -= sizeof(Elf64_auxv_t) / sizeof(void*);
 
-  Elf64_auxv_t at_phdr = { AT_PHDR, {.a_val = (uint64_t)&program_headers[0]} };
-  std::memcpy(stack_top, &at_phdr, sizeof(Elf64_auxv_t));
-  stack_top -= 2;
-
-  Elf64_auxv_t at_phent = { AT_PHENT, {.a_val = (uint64_t)&elf_header.e_phentsize}};
-  std::memcpy(stack_top, &at_phent, sizeof(Elf64_auxv_t));
-  stack_top -= 2;
-
-  Elf64_auxv_t at_phnum = { AT_PHNUM,  {.a_val = elf_header.e_phnum }};
-  std::memcpy(stack_top, &at_phnum, sizeof(Elf64_auxv_t));
-  stack_top -= 2;
+  Elf64_auxv_t at_base = { AT_BASE,  {.a_val = (uint64_t)loaded_segments[1] }};
+  std::memcpy(stack_top, &at_base, sizeof(Elf64_auxv_t));
+  std::cout<<"at base:"<<std::hex<<loaded_segments[1]<<"\n";
+  stack_top -= sizeof(Elf64_auxv_t) / sizeof(void*);
 
   Elf64_auxv_t at_pagesz = { AT_PAGESZ,  {.a_val = sysconf(_SC_PAGESIZE) }};
   std::memcpy(stack_top, &at_pagesz, sizeof(Elf64_auxv_t));
-  stack_top -= 2;
+  stack_top -= sizeof(Elf64_auxv_t) / sizeof(void*);
 
-  Elf64_auxv_t at_base = { AT_BASE,  {.a_val = (uint64_t)loaded_segments[0] }};
-  std::memcpy(stack_top, &at_base, sizeof(Elf64_auxv_t));
-  stack_top -= 2;
+  Elf64_auxv_t at_phnum = { AT_PHNUM,  {.a_val = interp_elf_hdr.e_phnum }};
+  std::memcpy(stack_top, &at_phnum, sizeof(Elf64_auxv_t));
+  stack_top -= sizeof(Elf64_auxv_t) / sizeof(void*);
 
-  Elf64_auxv_t at_entry = { AT_ENTRY,  {.a_val = (uint64_t)(elf_header.e_entry + (uint64_t)base_elf) }};
-  std::memcpy(stack_top, &at_entry, sizeof(Elf64_auxv_t));
-  stack_top -= 2;
+  Elf64_auxv_t at_phent = { AT_PHENT, {.a_val = (uint64_t)elf_header.e_phentsize}};
+  std::memcpy(stack_top, &at_phent, sizeof(Elf64_auxv_t));
+  stack_top -= sizeof(Elf64_auxv_t) / sizeof(void*);
 
-  *--stack_top = (void*)0;
+  Elf64_auxv_t at_phdr = { AT_PHDR, {.a_val = (uint64_t)&program_headers[0]} };
+  std::memcpy(stack_top, &at_phdr, sizeof(Elf64_auxv_t));
+  stack_top -= sizeof(Elf64_auxv_t) / sizeof(void*);
+
+  // auxv
+  Elf64_auxv_t at_null = { AT_NULL, {.a_val = NULL}};
+  std::memcpy(stack_top, &at_null, sizeof(Elf64_auxv_t));
+  stack_top -= sizeof(Elf64_auxv_t) / sizeof(void*);
+
+  void* start_of_auxv = stack_top;
+  std::reverse(envp_pointers.begin(), envp_pointers.end());
   for (auto e: envp_pointers) {
     *--stack_top = e;
   }
-  *--stack_top = (void*)0;
+  std::cout<<"Start of envp"<<std::hex<<stack_top<<"\n";
+  std::reverse(argv_pointers.begin(), argv_pointers.end());
   for (auto a: argv_pointers) {
     *--stack_top = a;
   }
@@ -226,8 +176,23 @@ int main(int argc, char **argv, char **envp) {
   // push argc
   *(int*)--stack_top = argc;
   
+  *--stack_top = entry_point;
   // Set up registers and jump to execution
-  INIT_AND_JUMP(stack_top, &argc, &argv, &envp, &envp, &argv[0], entry_point);
+  asm volatile(
+      "mov %0, %%rdx\n"      // Load the pointer to the start of auxv into rdx
+      "mov %1, %%rsp\n"      // Load the stack_top into rsp
+      "xor %%rbp, %%rbp\n"
+      "xor %%rbx, %%rbx\n"
+      "xor %%r12, %%r12\n"
+      "xor %%rdx, %%rdx\n"
+      "xor %%rax, %%rax\n"
+      "ret"
+      :
+      : "m"(start_of_auxv), "r"(stack_top)
+      : "memory", "rdx"
+  );
+
+
 
   close(fd);
   close(interp_fd);
