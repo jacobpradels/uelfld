@@ -8,10 +8,10 @@
 #include <limits.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <vector>
 #include <cstring>
 #include <algorithm>
 
+#include "stack_setup.h"
 #include "elf_loader.h"
 
 void get_program_headers(int fd, Elf64_Ehdr header, Elf64_Phdr (&pheader)[]) {
@@ -74,124 +74,44 @@ int main(int argc, char **argv, char **envp) {
   }
   void *loaded_segments[interp_elf_hdr.e_phnum];// I was here
   Elf64_Phdr interp_program_headers[interp_elf_hdr.e_phnum];
+  void* entry_point;
   if (interpreter_index != -1) {
     // Retrieve Interpreter Program Headers
     get_program_headers(interp_fd, interp_elf_hdr, interp_program_headers);
 
     // Load Interpreter LOAD Segments into memory
     base_interp = mmap_elf_segments(interp_elf_hdr, interp_program_headers, interp_fd, loaded_segments);
+    entry_point = (void*)(base_interp + interp_elf_hdr.e_entry);
   }
 
   void *loaded_elf_segments[elf_header.e_phnum];
   void* base_elf = mmap_elf_segments(elf_header, program_headers, fd, loaded_elf_segments);
 
-  // Set up the stack
-  size_t stack_size = 32 * 1024 * 1024;
-  void* stack_base = mmap(
-      nullptr, 
-      stack_size, 
-      PROT_READ | PROT_WRITE, 
-      MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN, 
-      -1, 
-      0
-  );
+  void* stack_top = setup_stack(elf_header, base_elf, base_interp, argv, envp);
 
-  if (stack_base == MAP_FAILED) {
-      std::cerr<<"Failed to allocate memory\n";
-      std::cerr << "Error code: " << errno << std::endl;
-  }
-  void* entry_point;
-  if (interpreter_index != -1) {
-    entry_point = reinterpret_cast<void*>(base_interp + interp_elf_hdr.e_entry);
-  } else {
-    entry_point = reinterpret_cast<void*>(base_elf + elf_header.e_entry - 0x400000);
-  }
-  std::cout<<std::hex<<entry_point<<"\n";
-  void** stack_top = (void**)((char*)stack_base + stack_size);
-
-  *--stack_top = 0;
-  // push envp strings backwards
-  std::vector<void*> envp_pointers;
-  stack_top--;
-  for (int i = 0; envp[i] != nullptr; i++) {
-    if (strlen(envp[i]) < sysconf(_SC_PAGESIZE) * 32) {
-      envp_pointers.push_back(std::memcpy(stack_top, envp[i], strlen(envp[i])));
-      stack_top -= strlen(envp[i]) + 1;
-    }
-  }
-
-  *--stack_top = 0;
-  stack_top--;
-  // push argv strings backwards
-  std::vector<void*> argv_pointers;
-  argv[0] = interp;
-  for (int i = 0; i < argc; i++) {
-    argv_pointers.push_back(std::memcpy(stack_top, argv[i], strlen(argv[i])));
-    stack_top -= strlen(argv[i]) + 1;
-  }
-
-  *--stack_top = 0;
-
-  Elf64_auxv_t at_entry = { AT_ENTRY,  {.a_val = reinterpret_cast<uint64_t>(entry_point)}};
-  std::memcpy(stack_top, &at_entry, sizeof(Elf64_auxv_t));
-  stack_top -= sizeof(Elf64_auxv_t) / sizeof(void*);
-
-  Elf64_auxv_t at_base = { AT_BASE,  {.a_val = (uint64_t)loaded_segments[1] }};
-  std::memcpy(stack_top, &at_base, sizeof(Elf64_auxv_t));
-  std::cout<<"at base:"<<std::hex<<loaded_segments[1]<<"\n";
-  stack_top -= sizeof(Elf64_auxv_t) / sizeof(void*);
-
-  Elf64_auxv_t at_pagesz = { AT_PAGESZ,  {.a_val = sysconf(_SC_PAGESIZE) }};
-  std::memcpy(stack_top, &at_pagesz, sizeof(Elf64_auxv_t));
-  stack_top -= sizeof(Elf64_auxv_t) / sizeof(void*);
-
-  Elf64_auxv_t at_phnum = { AT_PHNUM,  {.a_val = interp_elf_hdr.e_phnum }};
-  std::memcpy(stack_top, &at_phnum, sizeof(Elf64_auxv_t));
-  stack_top -= sizeof(Elf64_auxv_t) / sizeof(void*);
-
-  Elf64_auxv_t at_phent = { AT_PHENT, {.a_val = (uint64_t)elf_header.e_phentsize}};
-  std::memcpy(stack_top, &at_phent, sizeof(Elf64_auxv_t));
-  stack_top -= sizeof(Elf64_auxv_t) / sizeof(void*);
-
-  Elf64_auxv_t at_phdr = { AT_PHDR, {.a_val = (uint64_t)&program_headers[0]} };
-  std::memcpy(stack_top, &at_phdr, sizeof(Elf64_auxv_t));
-  stack_top -= sizeof(Elf64_auxv_t) / sizeof(void*);
-
-  // auxv
-  Elf64_auxv_t at_null = { AT_NULL, {.a_val = NULL}};
-  std::memcpy(stack_top, &at_null, sizeof(Elf64_auxv_t));
-  stack_top -= sizeof(Elf64_auxv_t) / sizeof(void*);
-
-  void* start_of_auxv = stack_top;
-  std::reverse(envp_pointers.begin(), envp_pointers.end());
-  for (auto e: envp_pointers) {
-    *--stack_top = e;
-  }
-  std::cout<<"Start of envp"<<std::hex<<stack_top<<"\n";
-  std::reverse(argv_pointers.begin(), argv_pointers.end());
-  for (auto a: argv_pointers) {
-    *--stack_top = a;
-  }
-
-  // push argc
-  *(int*)--stack_top = argc;
-  
-  *--stack_top = entry_point;
-  // Set up registers and jump to execution
   asm volatile(
-      "mov %0, %%rdx\n"      // Load the pointer to the start of auxv into rdx
-      "mov %1, %%rsp\n"      // Load the stack_top into rsp
-      "xor %%rbp, %%rbp\n"
-      "xor %%rbx, %%rbx\n"
-      "xor %%r12, %%r12\n"
-      "xor %%rdx, %%rdx\n"
-      "xor %%rax, %%rax\n"
-      "ret"
-      :
-      : "m"(start_of_auxv), "r"(stack_top)
-      : "memory", "rdx"
-  );
+        "mov %%rsp, %%rax\n\t"
+        "push %%rbx\n\t"
 
+        "xor %%rax, %%rax\n\t"
+        "xor %%rbx, %%rbx\n\t"
+        "xor %%rcx, %%rcx\n\t"
+        "xor %%rdx, %%rdx\n\t"
+        "xor %%rdi, %%rdi\n\t"
+        "xor %%rsi, %%rsi\n\t"
+
+        "xor %%r9, %%r9\n\t"
+        "xor %%r10, %%r10\n\t"
+        "xor %%r11, %%r11\n\t"
+        "xor %%r12, %%r12\n\t"
+        "xor %%r13, %%r13\n\t"
+        "xor %%r14, %%r14\n\t"
+        "xor %%r15, %%r15\n\t"
+
+        "ret\n\t"
+        :
+        : "a"(stack_top), "b"(entry_point)
+    );
 
 
   close(fd);
