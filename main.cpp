@@ -89,7 +89,7 @@ int main(int argc, char **argv, char **envp) {
   if (interpreter_index == -1) {
     entry_point = (void*)base_elf + elf_header.e_entry;
   }
-  void* stack_top = setup_stack(elf_header, base_elf, base_interp, argv, envp);
+  void* stack_top = setup_stack(elf_header, interp_elf_hdr, base_elf, base_interp, argv, envp, interp);
 
   asm volatile(
         "mov %0, %%rsp\n\t"

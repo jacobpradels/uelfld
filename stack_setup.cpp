@@ -16,7 +16,7 @@ void write_aux_val(char** sp, uint64_t aux_id, uint64_t aux_val) {
 }
 
 
-void* setup_stack(Elf64_Ehdr LoadInfo, void* load_address, void* interp_base, char **argv, char **envp) {
+void* setup_stack(Elf64_Ehdr LoadInfo, Elf64_Ehdr Interp_header, void* load_address, void* interp_base, char **argv, char **envp, char* interp_path) {
     int stack_flags = 0;
     stack_flags |= MAP_PRIVATE;
     stack_flags |= MAP_ANONYMOUS;
@@ -37,19 +37,27 @@ void* setup_stack(Elf64_Ehdr LoadInfo, void* load_address, void* interp_base, ch
     std::vector<char*> env_pointers;
     for (char** env = envp; *env != 0; env++) {
         char* thisEnv = *env;
-        stack_pointer -= strlen(thisEnv);
-        write_data(stack_pointer, thisEnv, strlen(thisEnv));
+        stack_pointer -= strlen(thisEnv) + 1;
+        std::cout<<thisEnv<<"\n";
+        write_data(stack_pointer, thisEnv, strlen(thisEnv) + 1);
         env_pointers.push_back(stack_pointer);
     }
     std::vector<char*> arg_pointers;
     int i =0;
     for (char** arg = argv; *arg != 0; arg++, i++) {
         // Skip the name of the executable
-        if (i == 1) continue;
+        if (i == 0) {
+            stack_pointer -= strlen(interp_path) + 1;
+            write_data(stack_pointer, interp_path, strlen(interp_path) + 1);
+            arg_pointers.push_back(stack_pointer);
+            continue;
+        }
         char* thisArg = *arg;
-        stack_pointer -= (strlen(thisArg) + 1);
+        std::cout<<thisArg<<"\n"; // Prints string correctly
+        stack_pointer -= strlen(thisArg) + 1;
+        write_data(stack_pointer, thisArg, strlen(thisArg) + 1);
         arg_pointers.push_back(stack_pointer);
-        write_data(stack_pointer, thisArg, strlen(thisArg));
+        // Inspecting data at stack_pointer location shows ""
     }
 
     // 16 byte align stack_pointer
@@ -72,7 +80,7 @@ void* setup_stack(Elf64_Ehdr LoadInfo, void* load_address, void* interp_base, ch
     char* prng_pointer = stack_pointer;
 
     // space for auxv
-    stack_pointer -= 0x120;
+    stack_pointer -= 0x130;
 
     // make space for argv and envp pointers
     uint64_t pointers = (arg_pointers.size() + 1) + (env_pointers.size() + 1) + 1;
@@ -102,25 +110,30 @@ void* setup_stack(Elf64_Ehdr LoadInfo, void* load_address, void* interp_base, ch
     write_pointer(&stack_pointer, 0x00);
 
     write_aux_val(&stack_pointer, AT_SYSINFO_EHDR, getauxval(AT_SYSINFO_EHDR));
+    write_aux_val(&stack_pointer, 0x33, getauxval(0x33));
 
-    write_aux_val(&stack_pointer, AT_HWCAP, getauxval(AT_HWCAP));
+    // write_aux_val(&stack_pointer, AT_HWCAP, getauxval(AT_HWCAP));
+    write_aux_val(&stack_pointer, AT_HWCAP, 0x178bfbff);
     write_aux_val(&stack_pointer, AT_PAGESZ, getauxval(AT_PAGESZ));
     write_aux_val(&stack_pointer, AT_CLKTCK, getauxval(AT_CLKTCK));
-    write_aux_val(&stack_pointer, AT_HWCAP2, getauxval(AT_HWCAP2));
+    // write_aux_val(&stack_pointer, AT_HWCAP2, getauxval(AT_HWCAP2));
 
-    write_aux_val(&stack_pointer, AT_PHDR, (uint64_t)load_address + (uint64_t)LoadInfo.e_phoff);
+    write_aux_val(&stack_pointer, AT_PHDR, (uint64_t)interp_base + (uint64_t)Interp_header.e_phoff);
     write_aux_val(&stack_pointer, AT_PHENT, 0x38);
-    write_aux_val(&stack_pointer, AT_PHNUM, (uint64_t)LoadInfo.e_phnum);
+    write_aux_val(&stack_pointer, AT_PHNUM, (uint64_t)Interp_header.e_phnum);
+    // write_aux_val(&stack_pointer, AT_PHNUM, (uint64_t)LoadInfo.e_phnum);
 
     // base adddress of the elf interpeter
-    write_aux_val(&stack_pointer, AT_BASE, (uint64_t)interp_base);
+    write_aux_val(&stack_pointer, AT_BASE, 0x0);
+    // write_aux_val(&stack_pointer, AT_BASE, (uint64_t)interp_base);
 
     write_aux_val(&stack_pointer, AT_FLAGS, 0x0);
 
     switch (LoadInfo.e_type) {
         // Dynamic
         case 3:
-            write_aux_val(&stack_pointer, AT_ENTRY, ((uint64_t)load_address + (uint64_t)LoadInfo.e_entry));
+            // write_aux_val(&stack_pointer, AT_ENTRY, ((uint64_t)load_address + (uint64_t)LoadInfo.e_entry));
+            write_aux_val(&stack_pointer, AT_ENTRY, ((uint64_t)interp_base + (uint64_t)Interp_header.e_entry));
             break;
         // Exec
         case 2:
@@ -139,8 +152,14 @@ void* setup_stack(Elf64_Ehdr LoadInfo, void* load_address, void* interp_base, ch
     // 16 bytes of random memory for libc to use
     write_aux_val(&stack_pointer, AT_RANDOM, (uint64_t)prng_pointer);
 
-    write_aux_val(&stack_pointer, AT_EXECFN, (uint64_t)&arg_pointers[0]);
+    write_aux_val(&stack_pointer, 0x1a, getauxval(0x1a));
 
+
+    write_aux_val(&stack_pointer, AT_EXECFN, (uint64_t)arg_pointers[0]);
+
+    // hack
+    write_aux_val(&stack_pointer, 0x0f, getauxval(0x0f));
+    
     write_aux_val(&stack_pointer, AT_NULL, 0x0);
 
     return rsp;
