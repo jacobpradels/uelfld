@@ -86,12 +86,14 @@ int main(int argc, char **argv, char **envp) {
 
   void *loaded_elf_segments[elf_header.e_phnum];
   void* base_elf = mmap_elf_segments(elf_header, program_headers, fd, loaded_elf_segments);
-
+  if (interpreter_index == -1) {
+    entry_point = (void*)base_elf + elf_header.e_entry;
+  }
   void* stack_top = setup_stack(elf_header, base_elf, base_interp, argv, envp);
 
   asm volatile(
-        "mov %%rsp, %%rax\n\t"
-        "push %%rbx\n\t"
+        "mov %0, %%rsp\n\t"
+        "push %1\n\t"
 
         "xor %%rax, %%rax\n\t"
         "xor %%rbx, %%rbx\n\t"

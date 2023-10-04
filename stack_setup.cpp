@@ -83,22 +83,23 @@ void* setup_stack(Elf64_Ehdr LoadInfo, void* load_address, void* interp_base, ch
     // the pointer we will return
     void* rsp = reinterpret_cast<void*>(stack_pointer);
 
+    // write argc
     write_pointer(&stack_pointer, arg_pointers.size());
     
-    for (auto a : arg_pointers) {
-        std::cout<<std::hex<<(uint64_t)&a<<"\n";
-        write_pointer(&stack_pointer, (uint64_t)&a);
+    for (char* a : arg_pointers) {
+        std::cout<<std::hex<<(uint64_t)a<<"\n";
+        write_pointer(&stack_pointer, (uint64_t)a);
     }
 
     // NULL for end of argv
-    write_pointer(&stack_pointer, 0x0);
+    write_pointer(&stack_pointer, 0x00);
 
-    for (auto e : env_pointers) {
-        write_pointer(&stack_pointer, (uint64_t)&e);
+    for (char* e : env_pointers) {
+        write_pointer(&stack_pointer, (uint64_t)e);
     }
 
     // NULL for end of envp
-    write_pointer(&stack_pointer, 0x0);
+    write_pointer(&stack_pointer, 0x00);
 
     write_aux_val(&stack_pointer, AT_SYSINFO_EHDR, getauxval(AT_SYSINFO_EHDR));
 
@@ -117,14 +118,16 @@ void* setup_stack(Elf64_Ehdr LoadInfo, void* load_address, void* interp_base, ch
     write_aux_val(&stack_pointer, AT_FLAGS, 0x0);
 
     switch (LoadInfo.e_type) {
-        // Exec
+        // Dynamic
         case 3:
             write_aux_val(&stack_pointer, AT_ENTRY, ((uint64_t)load_address + (uint64_t)LoadInfo.e_entry));
             break;
-        // Dynamic
+        // Exec
         case 2:
-            write_aux_val(&stack_pointer, AT_ENTRY, LoadInfo.e_entry);
+            write_aux_val(&stack_pointer, AT_ENTRY, (uint64_t)LoadInfo.e_entry);
             break;
+        default:
+            std::cerr<<"Wrong e_type\n";
     }
 
     write_aux_val(&stack_pointer, AT_UID, getauxval(AT_UID));
