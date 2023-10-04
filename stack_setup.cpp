@@ -109,7 +109,7 @@ void* setup_stack(Elf64_Ehdr LoadInfo, Elf64_Ehdr Interp_header, void* load_addr
     // NULL for end of envp
     write_pointer(&stack_pointer, 0x00);
 
-    write_aux_val(&stack_pointer, AT_SYSINFO_EHDR, getauxval(AT_SYSINFO_EHDR));
+    write_aux_val(&stack_pointer, AT_SYSINFO_EHDR, (uint64_t)interp_base);
     write_aux_val(&stack_pointer, 0x33, getauxval(0x33));
 
     // write_aux_val(&stack_pointer, AT_HWCAP, getauxval(AT_HWCAP));
